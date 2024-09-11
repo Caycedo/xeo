@@ -967,7 +967,6 @@ func TestSendPaidMediaPhoto(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFilePath("assets/logo.png"),
 			},
 		},
@@ -987,7 +986,6 @@ func TestSendPaidMediaPhotoByID(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFileID(photoID),
 			},
 		},
@@ -1007,7 +1005,6 @@ func TestSendPaidMediaPhotoURL(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFileURL(photoURL),
 			},
 		},
@@ -1033,7 +1030,6 @@ func TestSendPaidMediaPhotoBytes(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFileBytes("echotron_test.png", data),
 			},
 		},
@@ -1053,7 +1049,6 @@ func TestSendPaidMediaPhotoWithKeyboard(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFilePath("assets/logo.png"),
 			},
 		},
@@ -1074,7 +1069,6 @@ func TestSendPaidMediaVideo(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFilePath("assets/tests/video_note.mp4"),
 			},
 		},
@@ -1094,7 +1088,6 @@ func TestSendPaidMediaVideoByID(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFileID(paidVideoID),
 			},
 		},
@@ -1114,7 +1107,6 @@ func TestSendPaidMediaVideoURL(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFileURL(videoNoteURL),
 			},
 		},
@@ -1140,7 +1132,6 @@ func TestSendPaidMediaVideoBytes(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFileBytes("video_note.mp4", data),
 			},
 		},
@@ -1160,7 +1151,6 @@ func TestSendPaidMediaVideoWithKeyboard(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFilePath("assets/tests/video_note.mp4"),
 			},
 		},
@@ -1181,27 +1171,21 @@ func TestSendPaidMediaGroup(t *testing.T) {
 		1,
 		[]GroupableInputMedia{
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFilePath("assets/logo.png"),
 			},
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFileID(photoID),
 			},
 			InputPaidMediaPhoto{
-				Type:  InputPaidMediaTypePhoto,
 				Media: NewInputFileURL(logoInvURL),
 			},
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFilePath("assets/tests/video_note.mp4"),
 			},
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFileID(paidVideoID),
 			},
 			InputPaidMediaVideo{
-				Type:  InputPaidMediaTypeVideo,
 				Media: NewInputFileURL(videoNoteURL),
 			},
 		},
