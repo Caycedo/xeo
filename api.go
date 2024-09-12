@@ -15,11 +15,11 @@ type API struct {
 	baseURL string
 }
 
-// Option defines a function type for configuring the API.
-type Option func(*API) error
+// APIOption defines a function type for configuring the API.
+type APIOption func(*API) error
 
 // NewAPI creates a new API object with the provided options.
-func NewAPI(opts ...Option) (*API, error) {
+func NewAPI(opts ...APIOption) (*API, error) {
 	api := &API{
 		client:  new(http.Client),
 		baseURL: "https://api.telegram.org/bot",
@@ -41,7 +41,7 @@ func NewAPI(opts ...Option) (*API, error) {
 }
 
 // WithToken sets the token for the API.
-func WithToken(token string) Option {
+func WithToken(token string) APIOption {
 	return func(api *API) error {
 		if token == "" {
 			return fmt.Errorf("token cannot be empty")
@@ -52,7 +52,7 @@ func WithToken(token string) Option {
 }
 
 // WithBaseURL sets a custom base URL for the API.
-func WithBaseURL(url string) Option {
+func WithBaseURL(url string) APIOption {
 	return func(api *API) error {
 		if url == "" {
 			return fmt.Errorf("base URL cannot be empty")
@@ -63,7 +63,7 @@ func WithBaseURL(url string) Option {
 }
 
 // WithHTTPClient sets a custom HTTP client for the API.
-func WithHTTPClient(client *http.Client) Option {
+func WithHTTPClient(client *http.Client) APIOption {
 	return func(api *API) error {
 		if client == nil {
 			return fmt.Errorf("HTTP client cannot be nil")
