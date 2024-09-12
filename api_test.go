@@ -111,7 +111,7 @@ var (
 	banUserID           = int64(41876271)
 	channelID           = int64(-1001563144067)
 	groupID             = int64(-1001265771214)
-	pinMsgID            = 11
+	pinMsgID            = int(11)
 	photoID             = "AgACAgQAAxkDAAMrYFtODxV2LL6-kR_6qSbG9n8dIOIAAti1MRug29lSkNq_9o8PC5uMd7EnXQADAQADAgADbQADeooGAAEeBA"
 	animationID         = "CgACAgQAAxkDAAICQGBcoGs7GFJ-tR5AkbRRLFTbvdxXAAJ1CAAC1zHgUu-ciZqanytIHgQ"
 	audioID             = "CQACAgQAAxkDAAIBCmBbamz_DqKk2GmrzmoM0SrzRN6wAAK9CAACoNvZUgPyk-87OM_YHgQ"
