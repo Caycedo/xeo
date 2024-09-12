@@ -149,7 +149,12 @@ func TestDispatcherRateLimiting(t *testing.T) {
 	if err := d.Start(); err != nil {
 		t.Fatalf("Failed to start dispatcher: %v", err)
 	}
-	defer d.Stop(ctx)
+	defer func(dsp *Dispatcher, ctx context.Context) {
+		err := dsp.Stop(ctx)
+		if err != nil {
+			t.Logf("Error stopping dispatcher: %v", err)
+		}
+	}(d, ctx)
 
 	update := &Update{Message: &Message{Chat: Chat{ID: 1}}}
 
