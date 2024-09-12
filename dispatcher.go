@@ -229,6 +229,20 @@ func (d *Dispatcher) worker(ctx context.Context) error {
 			if d.inShutdown.Load() {
 				continue // Discard updates during shutdown
 			}
+
+			if d.options.rateLimitEnabled {
+				limiter, err := d.getLimiter(update.ChatID())
+				if err != nil {
+					return fmt.Errorf("getting rate limiter: %w", err)
+				}
+
+				if !limiter.Allow() {
+					// Drop the update if the rate limit is exceeded
+					fmt.Printf("Rate limit exceeded for chat %d, dropping update\n", update.ChatID())
+					continue
+				}
+			}
+
 			if err := d.options.workerSem.Acquire(ctx, 1); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return err
@@ -248,21 +262,9 @@ func (d *Dispatcher) worker(ctx context.Context) error {
 }
 
 func (d *Dispatcher) processUpdate(update *Update) error {
-	chatID := update.ChatID()
-	bot, err := d.sessions.getSession(chatID, d.newBot)
+	bot, err := d.sessions.getSession(update.ChatID(), d.newBot)
 	if err != nil {
 		return fmt.Errorf("getting bot instance: %w", err)
-	}
-
-	if d.options.rateLimitEnabled {
-		limiter, err := d.getLimiter(chatID)
-		if err != nil {
-			return fmt.Errorf("getting rate limiter: %w", err)
-		}
-
-		if err := limiter.Wait(context.Background()); err != nil {
-			return fmt.Errorf("rate limit exceeded for chat %d: %w", chatID, err)
-		}
 	}
 
 	bot.Update(update)
@@ -321,11 +323,6 @@ func (d *Dispatcher) pollUpdates(ctx context.Context) error {
 }
 
 func (d *Dispatcher) getLimiter(chatID int64) (*rate.Limiter, error) {
-	if limiter, ok := d.rateLimiters.Load(chatID); ok {
-		return limiter.(*rate.Limiter), nil
-	}
-
-	limiter := rate.NewLimiter(d.options.rateLimit, d.options.rateLimitBurst)
-	d.rateLimiters.Store(chatID, limiter)
-	return limiter, nil
+	limiter, _ := d.rateLimiters.LoadOrStore(chatID, rate.NewLimiter(d.options.rateLimit, d.options.rateLimitBurst))
+	return limiter.(*rate.Limiter), nil
 }
