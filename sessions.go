@@ -3,6 +3,8 @@ package xeo
 import (
 	"context"
 	"fmt"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,11 +12,13 @@ import (
 
 // Session Manager
 type sessionManager struct {
-	sessions sync.Map
-	locks    sync.Map
-	ttl      time.Duration
-	ctx      context.Context
-	cancel   context.CancelFunc
+	sessions        sync.Map
+	locks           sync.Map
+	ttl             time.Duration
+	ctx             context.Context
+	cancel          context.CancelFunc
+	cleanupCallback func(int64)
+	logger          zerolog.Logger
 }
 
 type session struct {
@@ -28,7 +32,9 @@ func newSessionManager(ttl time.Duration) *sessionManager {
 		ttl:    ttl,
 		ctx:    ctx,
 		cancel: cancel,
+		logger: log.With().Str("component", "session_manager").Logger(),
 	}
+	sm.logger.Info().Dur("ttl", ttl).Msg("Session manager initialized")
 	go sm.periodicCleanup()
 	return sm
 }
@@ -43,17 +49,18 @@ func (sm *sessionManager) getSession(chatID int64, newBot NewBotFn) (bot Bot, er
 	if value, loaded := sm.sessions.Load(chatID); loaded {
 		if s, ok := value.(*session); ok {
 			s.lastAccessed.Store(time.Now().UnixNano())
+			sm.logger.Debug().Int64("chat_id", chatID).Msg("Retrieved existing session")
 			return s.bot, nil
 		}
-		// Remove invalid session
 		sm.delete(chatID)
+		sm.logger.Error().Int64("chat_id", chatID).Msg("Invalid session type found and removed")
 		return nil, fmt.Errorf("invalid session type for chat ID %d", chatID)
 	}
 
-	// Use a defer to handle potential panics from newBot
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in newBot: %v", r)
+			sm.logger.Error().Int64("chat_id", chatID).Interface("panic", r).Msg("Panic in newBot")
 		}
 	}()
 
@@ -63,6 +70,7 @@ func (sm *sessionManager) getSession(chatID int64, newBot NewBotFn) (bot Bot, er
 	}
 	newSession.lastAccessed.Store(time.Now().UnixNano())
 	sm.sessions.Store(chatID, newSession)
+	sm.logger.Debug().Int64("chat_id", chatID).Msg("Created new session")
 
 	return bot, nil
 }
@@ -70,6 +78,7 @@ func (sm *sessionManager) getSession(chatID int64, newBot NewBotFn) (bot Bot, er
 func (sm *sessionManager) delete(chatID int64) {
 	sm.sessions.Delete(chatID)
 	sm.locks.Delete(chatID)
+	sm.logger.Debug().Int64("chat_id", chatID).Msg("Deleted session")
 }
 
 func (sm *sessionManager) add(chatID int64, newBot NewBotFn) error {
@@ -86,8 +95,10 @@ func (sm *sessionManager) add(chatID int64, newBot NewBotFn) error {
 
 	_, loaded := sm.sessions.LoadOrStore(chatID, newSession)
 	if loaded {
+		sm.logger.Warn().Int64("chat_id", chatID).Msg("Attempted to add existing session")
 		return fmt.Errorf("session for chat ID %d already exists", chatID)
 	}
+	sm.logger.Debug().Int64("chat_id", chatID).Msg("Added new session")
 	return nil
 }
 
@@ -105,25 +116,46 @@ func (sm *sessionManager) periodicCleanup() {
 	}
 }
 
+func (sm *sessionManager) HasSession(chatID int64) bool {
+	_, exists := sm.sessions.Load(chatID)
+	return exists
+}
+
+// Modify cleanup to also handle rate limiters
 func (sm *sessionManager) cleanup() {
 	now := time.Now().UnixNano()
+	expiredCount := 0
 	sm.sessions.Range(func(key, value interface{}) bool {
 		s := value.(*session)
+		chatID := key.(int64)
 		if now-s.lastAccessed.Load() > sm.ttl.Nanoseconds() {
-			sm.delete(key.(int64))
+			sm.delete(chatID)
+			if sm.cleanupCallback != nil {
+				sm.cleanupCallback(chatID)
+			}
+			expiredCount++
 		}
 		return true
 	})
+	if expiredCount > 0 {
+		sm.logger.Info().Int("expired_count", expiredCount).Msg("Cleaned up expired sessions")
+	}
+}
+
+func (sm *sessionManager) SetCleanupCallback(cb func(int64)) {
+	sm.cleanupCallback = cb
 }
 
 func (sm *sessionManager) Stop(ctx context.Context) error {
-	sm.cancel() // Cancel the internal context to stop the cleanup goroutine
+	sm.logger.Info().Msg("Stopping session manager")
+	sm.cancel()
 
-	// Wait for the cleanup goroutine to finish or for the provided context to be done
 	select {
 	case <-sm.ctx.Done():
+		sm.logger.Info().Msg("Session manager stopped successfully")
 		return nil
 	case <-ctx.Done():
+		sm.logger.Warn().Err(ctx.Err()).Msg("Context deadline exceeded while stopping")
 		return ctx.Err()
 	}
 }
@@ -138,5 +170,6 @@ func (sm *sessionManager) getActiveSessions() []int64 {
 }
 
 func (sm *sessionManager) updateTTL(newTTL time.Duration) {
+	sm.logger.Info().Dur("old_ttl", sm.ttl).Dur("new_ttl", newTTL).Msg("Updating session TTL")
 	sm.ttl = newTTL
 }

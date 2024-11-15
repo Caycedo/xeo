@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
@@ -12,6 +13,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+var (
+	ErrDispatcherShutdown   = errors.New("dispatcher is shutting down")
+	ErrDispatcherRunning    = errors.New("dispatcher is already running")
+	ErrDispatcherNotRunning = errors.New("dispatcher is not running")
+	ErrNilUpdate            = errors.New("received nil update")
+	ErrNilBot               = errors.New("got nil bot instance")
+	ErrInvalidParam         = errors.New("invalid parameter")
 )
 
 type Bot interface {
@@ -34,7 +44,7 @@ type Dispatcher struct {
 	updateChan   chan *Update
 	wg           sync.WaitGroup
 	rateLimiters sync.Map // map[int64]*rate.Limiter
-	logger       *zap.Logger
+	logger       zerolog.Logger
 }
 
 type dispatcherOptions struct {
@@ -53,7 +63,7 @@ type DSPOption func(*dispatcherOptions) error
 func WithPollInterval(interval time.Duration) DSPOption {
 	return func(o *dispatcherOptions) error {
 		if interval <= 0 {
-			return errors.New("poll interval must be positive")
+			return fmt.Errorf("%w: poll interval must be positive", ErrInvalidParam)
 		}
 		o.pollInterval = interval
 		return nil
@@ -69,6 +79,9 @@ func WithRateLimiting(enabled bool) DSPOption {
 
 func WithRateLimit(limit rate.Limit, burst int) DSPOption {
 	return func(o *dispatcherOptions) error {
+		if burst <= 0 {
+			return fmt.Errorf("%w: burst must be positive", ErrInvalidParam)
+		}
 		o.rateLimit = limit
 		o.rateLimitBurst = burst
 		return nil
@@ -78,7 +91,7 @@ func WithRateLimit(limit rate.Limit, burst int) DSPOption {
 func WithUpdateBufferSize(size int) DSPOption {
 	return func(o *dispatcherOptions) error {
 		if size <= 0 {
-			return errors.New("update buffer size must be positive")
+			return fmt.Errorf("%w: update buffer size must be positive", ErrInvalidParam)
 		}
 		o.updateBufferSize = size
 		return nil
@@ -88,7 +101,7 @@ func WithUpdateBufferSize(size int) DSPOption {
 func WithSessionTTL(ttl time.Duration) DSPOption {
 	return func(o *dispatcherOptions) error {
 		if ttl <= 0 {
-			return errors.New("session TTL must be positive")
+			return fmt.Errorf("%w: session TTL must be positive", ErrInvalidParam)
 		}
 		o.sessionTTL = ttl
 		return nil
@@ -105,7 +118,7 @@ func WithAllowedUpdates(types []UpdateType) DSPOption {
 func WithMaxConcurrentUpdates(max int64) DSPOption {
 	return func(o *dispatcherOptions) error {
 		if max <= 0 {
-			return errors.New("max concurrent updates must be positive")
+			return fmt.Errorf("%w: max concurrent updates must be positive", ErrInvalidParam)
 		}
 		o.workerSem = semaphore.NewWeighted(max)
 		return nil
@@ -113,10 +126,7 @@ func WithMaxConcurrentUpdates(max int64) DSPOption {
 }
 
 func NewDispatcher(token string, newBot NewBotFn, opts ...DSPOption) (*Dispatcher, error) {
-	logger, err := zap.NewProduction()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create logger: %w", err)
-	}
+	logger := log.With().Str("component", "dispatcher").Logger()
 
 	options := dispatcherOptions{
 		pollInterval:     5 * time.Second,
@@ -124,15 +134,14 @@ func NewDispatcher(token string, newBot NewBotFn, opts ...DSPOption) (*Dispatche
 		sessionTTL:       24 * time.Hour,
 		allowedUpdates:   []UpdateType{},
 		workerSem:        semaphore.NewWeighted(int64(runtime.NumCPU() * 2)),
-
 		rateLimitEnabled: true,
-		rateLimit:        rate.Every(time.Minute / 20), // Default: 20 per minute
+		rateLimit:        rate.Every(time.Minute / 20),
 		rateLimitBurst:   5,
 	}
 
 	for _, opt := range opts {
 		if err := opt(&options); err != nil {
-			logger.Error("Failed to apply option", zap.Error(err))
+			logger.Error().Err(err).Msg("Failed to apply option")
 			return nil, err
 		}
 	}
@@ -146,13 +155,19 @@ func NewDispatcher(token string, newBot NewBotFn, opts ...DSPOption) (*Dispatche
 		logger:       logger,
 	}
 
+	var err error
 	d.api, err = NewAPI(WithToken(token))
 	if err != nil {
-		logger.Error("Failed to create API", zap.Error(err))
+		logger.Error().Err(err).Msg("Failed to create API")
 		return nil, fmt.Errorf("failed to create API: %w", err)
 	}
 
-	logger.Info("Polling!")
+	d.sessions.SetCleanupCallback(func(chatID int64) {
+		d.rateLimiters.Delete(chatID)
+		d.logger.Debug().Int64("chat_id", chatID).Msg("Removed rate limiter for inactive user")
+	})
+
+	logger.Info().Msg("Polling!")
 	return d, nil
 }
 
@@ -161,11 +176,11 @@ func (d *Dispatcher) Start() error {
 	defer d.mu.Unlock()
 
 	if d.inShutdown.Load() {
-		return errors.New("dispatcher is shutting down")
+		return ErrDispatcherShutdown
 	}
 
 	if !d.isRunning.CompareAndSwap(false, true) {
-		return errors.New("dispatcher is already running")
+		return ErrDispatcherRunning
 	}
 
 	d.ctx, d.cancel = context.WithCancel(context.Background())
@@ -180,13 +195,14 @@ func (d *Dispatcher) Start() error {
 		return d.worker(ctx)
 	})
 
-	// Start a goroutine to wait for errors
 	go func() {
 		err := g.Wait()
 		if err != nil && !errors.Is(err, context.Canceled) {
-			d.logger.Error("Dispatcher error", zap.Error(err))
-			if stopErr := d.Stop(context.Background()); stopErr != nil {
-				d.logger.Error("Error stopping dispatcher", zap.Error(stopErr))
+			d.logger.Error().Err(err).Msg("Dispatcher error")
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stopCancel()
+			if stopErr := d.Stop(stopCtx); stopErr != nil {
+				d.logger.Error().Err(stopErr).Msg("Error stopping dispatcher")
 			}
 		}
 	}()
@@ -195,37 +211,33 @@ func (d *Dispatcher) Start() error {
 }
 
 func (d *Dispatcher) Stop(ctx context.Context) error {
-	// Ensure we flush any buffered log entries at the end
-	defer func() {
-		if err := d.logger.Sync(); err != nil {
-			// If we can't sync the logger, log it and move on
-			fmt.Printf("Failed to sync logger: %v\n", err)
-		}
-	}()
-
-	if !d.isRunning.CompareAndSwap(true, false) {
-		d.logger.Warn("Attempted to stop a non-running dispatcher")
-		return errors.New("dispatcher is not running")
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
 	}
 
 	d.mu.Lock()
-	if d.inShutdown.Swap(true) {
+	if !d.isRunning.Load() {
 		d.mu.Unlock()
-		d.logger.Warn("Attempted to stop an already shutting down dispatcher")
-		return errors.New("dispatcher is already shutting down")
+		return ErrDispatcherNotRunning
 	}
+	if d.inShutdown.Load() {
+		d.mu.Unlock()
+		return ErrDispatcherShutdown
+	}
+	d.inShutdown.Store(true)
+	d.isRunning.Store(false)
 	d.cancel()
 	close(d.updateChan)
 	d.mu.Unlock()
 
-	d.logger.Info("Stopping session manager")
-	// Stop the session manager
+	d.logger.Info().Msg("Stopping session manager")
 	if err := d.sessions.Stop(ctx); err != nil {
-		d.logger.Error("Failed to stop session manager", zap.Error(err))
+		d.logger.Error().Err(err).Msg("Failed to stop session manager")
 		return fmt.Errorf("failed to stop session manager: %w", err)
 	}
 
-	// Use a channel to signal when all goroutines have finished
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
@@ -234,25 +246,29 @@ func (d *Dispatcher) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		d.logger.Info("Polling stopped successfully")
+		d.logger.Info().Msg("Polling stopped successfully")
 		return nil
 	case <-ctx.Done():
-		d.logger.Warn("Context deadline exceeded while waiting for goroutines to finish", zap.Error(ctx.Err()))
+		d.logger.Warn().Err(ctx.Err()).Msg("Context deadline exceeded while waiting for goroutines to finish")
 		return ctx.Err()
 	}
 }
 
 func (d *Dispatcher) worker(ctx context.Context) error {
 	for {
+		if !d.isRunning.Load() {
+			return ErrDispatcherNotRunning
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case update, ok := <-d.updateChan:
 			if !ok {
-				return nil // Channel closed, exit gracefully
+				return nil
 			}
 			if d.inShutdown.Load() {
-				continue // Discard updates during shutdown
+				return ErrDispatcherShutdown
 			}
 
 			if d.options.rateLimitEnabled {
@@ -262,9 +278,7 @@ func (d *Dispatcher) worker(ctx context.Context) error {
 				}
 
 				if !limiter.Allow() {
-					// Drop the update if the rate limit is exceeded
-					d.logger.Warn("Rate limit exceeded, dropping update",
-						zap.Int64("chat_id", update.ChatID()))
+					d.logger.Warn().Int64("chat_id", update.ChatID()).Msg("Rate limit exceeded, dropping update")
 					continue
 				}
 			}
@@ -280,9 +294,10 @@ func (d *Dispatcher) worker(ctx context.Context) error {
 				defer d.options.workerSem.Release(1)
 				defer d.wg.Done()
 				if err := d.processUpdate(update); err != nil {
-					d.logger.Error("Error processing update",
-						zap.Error(err),
-						zap.Int64("chat_id", update.ChatID()))
+					d.logger.Error().
+						Err(err).
+						Int64("chat_id", update.ChatID()).
+						Msg("Error processing update")
 				}
 			}(update)
 		}
@@ -290,9 +305,18 @@ func (d *Dispatcher) worker(ctx context.Context) error {
 }
 
 func (d *Dispatcher) processUpdate(update *Update) error {
-	bot, err := d.sessions.getSession(update.ChatID(), d.newBot)
+	if update == nil {
+		return ErrNilUpdate
+	}
+
+	chatID := update.ChatID()
+	bot, err := d.sessions.getSession(chatID, d.newBot)
 	if err != nil {
 		return fmt.Errorf("getting bot instance: %w", err)
+	}
+
+	if bot == nil {
+		return ErrNilBot
 	}
 
 	bot.Update(update)
@@ -312,23 +336,24 @@ func (d *Dispatcher) pollUpdates(ctx context.Context) error {
 		AllowedUpdates: d.options.allowedUpdates,
 	}
 
-	ticker := time.NewTicker(d.options.pollInterval)
-	defer ticker.Stop()
-
 	for {
+		if !d.isRunning.Load() {
+			return ErrDispatcherNotRunning
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-time.After(d.options.pollInterval):
 			if d.inShutdown.Load() {
-				return nil
+				return ErrDispatcherShutdown
 			}
 			updates, err := d.api.GetUpdates(&opts)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return err
 				}
-				d.logger.Error("Failed to get updates", zap.Error(err))
+				d.logger.Error().Err(err).Msg("Failed to get updates")
 				continue
 			}
 
@@ -337,13 +362,18 @@ func (d *Dispatcher) pollUpdates(ctx context.Context) error {
 				opts.Offset = lastUpdateID + 1
 
 				for _, update := range updates.Result {
+					if update == nil {
+						d.logger.Warn().Msg("Received nil update from API")
+						continue
+					}
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
 					case d.updateChan <- update:
 					default:
-						d.logger.Warn("Update channel is full, discarding update",
-							zap.Int("update_id", update.ID))
+						d.logger.Warn().
+							Int("update_id", update.ID).
+							Msg("Update channel is full, discarding update")
 					}
 				}
 			}
@@ -352,6 +382,10 @@ func (d *Dispatcher) pollUpdates(ctx context.Context) error {
 }
 
 func (d *Dispatcher) getLimiter(chatID int64) (*rate.Limiter, error) {
-	limiter, _ := d.rateLimiters.LoadOrStore(chatID, rate.NewLimiter(d.options.rateLimit, d.options.rateLimitBurst))
-	return limiter.(*rate.Limiter), nil
+	value, _ := d.rateLimiters.LoadOrStore(chatID, rate.NewLimiter(d.options.rateLimit, d.options.rateLimitBurst))
+	limiter, ok := value.(*rate.Limiter)
+	if !ok {
+		return nil, fmt.Errorf("invalid rate limiter type for chat %d", chatID)
+	}
+	return limiter, nil
 }
